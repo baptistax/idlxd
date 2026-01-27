@@ -33,7 +33,7 @@ func NewClient(opts Options) (*Client, error) {
 		opts.Timeout = 30 * time.Second
 	}
 	if strings.TrimSpace(opts.CookiesPath) == "" {
-		return nil, errors.New("caminho do cookies.txt vazio")
+		return nil, errors.New("cookies.txt path is empty")
 	}
 
 	jar, err := cookiejar.New(nil)
@@ -60,7 +60,7 @@ func NewClient(opts Options) (*Client, error) {
 func (c *Client) FetchProfile(ctx context.Context, username string) (Profile, error) {
 	username = strings.TrimSpace(username)
 	if username == "" {
-		return Profile{}, errors.New("uso: idl <usuario>")
+		return Profile{}, errors.New("usage: idl <username>")
 	}
 	return Profile{Username: username}, nil
 }
@@ -71,7 +71,7 @@ func (c *Client) EnsureTokens(ctx context.Context) error {
 	}
 
 	if c.cookieValue("sessionid") == "" {
-		return errors.New("cookies.txt não contém sessionid (exporte os cookies do Instagram logado; Cookie-Editor costuma gerar linha #HttpOnly_... sessionid)")
+		return errors.New("cookies.txt is missing sessionid (export cookies from a logged-in Instagram session; Cookie-Editor often outputs a #HttpOnly_... sessionid line)")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseWWW+"/", nil)
@@ -82,12 +82,12 @@ func (c *Client) EnsureTokens(ctx context.Context) error {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("falha ao acessar o Instagram: %v", err)
+		return fmt.Errorf("failed to reach Instagram: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("Instagram retornou %s", resp.Status)
+		return fmt.Errorf("Instagram returned %s", resp.Status)
 	}
 
 	b, err := io.ReadAll(resp.Body)
@@ -100,7 +100,7 @@ func (c *Client) EnsureTokens(ctx context.Context) error {
 	fb := firstMatch(html, dtsgPatterns)
 
 	if lsd == "" || fb == "" {
-		return errors.New("não foi possível obter tokens da sessão (Instagram pode ter exigido verificação; abra o Instagram no navegador, confirme o login e gere o cookies.txt novamente)")
+		return errors.New("failed to extract session tokens (Instagram may require verification; open Instagram in your browser, complete the login, and export cookies.txt again)")
 	}
 
 	c.lsd = lsd
@@ -155,12 +155,12 @@ func (c *Client) GraphQL(ctx context.Context, referer, friendlyName, docID strin
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("falha na requisição: %v", err)
+		return fmt.Errorf("request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("Instagram retornou %s", resp.Status)
+		return fmt.Errorf("Instagram returned %s", resp.Status)
 	}
 
 	b, err := io.ReadAll(resp.Body)
@@ -169,7 +169,7 @@ func (c *Client) GraphQL(ctx context.Context, referer, friendlyName, docID strin
 	}
 
 	if err := json.Unmarshal(b, out); err != nil {
-		return errors.New("resposta inesperada do Instagram")
+		return errors.New("unexpected Instagram response")
 	}
 	return nil
 }

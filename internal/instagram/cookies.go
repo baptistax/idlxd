@@ -13,7 +13,7 @@ import (
 
 func LoadNetscapeCookiesIntoJar(path string, jar http.CookieJar) error {
 	if jar == nil {
-		return errors.New("cookie jar inválido")
+		return errors.New("invalid cookie jar")
 	}
 
 	f, err := os.Open(path)
