@@ -18,16 +18,11 @@ builds:
     ldflags:
       - -s -w
 
+# Publish raw binaries (no zip/tar)
 archives:
   - id: default
-    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
-    format: tar.gz
-    format_overrides:
-      - goos: windows
-        format: zip
-    files:
-      - README.md
-      - LICENSE*
+    formats: [ 'binary' ]
+    name_template: "idl_{{ .Os }}_{{ .Arch }}{{ if eq .Os \"windows\" }}.exe{{ end }}"
 
 checksum:
   name_template: "checksums.txt"
