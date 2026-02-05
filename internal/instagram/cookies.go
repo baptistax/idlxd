@@ -2,7 +2,11 @@ package instagram
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -11,20 +15,49 @@ import (
 	"time"
 )
 
-func LoadNetscapeCookiesIntoJar(path string, jar http.CookieJar) error {
+func LoadCookiesIntoJar(path string, jar http.CookieJar) error {
 	if jar == nil {
 		return errors.New("invalid cookie jar")
 	}
 
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	byHost := map[string][]*http.Cookie{}
+	cookies, err := parseCookies(data)
+	if err != nil {
+		return err
+	}
 
-	s := bufio.NewScanner(f)
+	setCookiesInJar(jar, cookies)
+	return nil
+}
+
+func LoadNetscapeCookiesIntoJar(path string, jar http.CookieJar) error {
+	return LoadCookiesIntoJar(path, jar)
+}
+
+func parseCookies(data []byte) ([]*http.Cookie, error) {
+	trimmed := bytes.TrimLeft(data, "\xef\xbb\xbf \t\r\n")
+	if len(trimmed) == 0 {
+		return nil, errors.New("cookies.txt is empty")
+	}
+
+	if trimmed[0] == '[' || trimmed[0] == '{' {
+		cookies, err := parseJSONCookies(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cookie-editor json format")
+		}
+		return cookies, nil
+	}
+
+	return parseNetscapeCookies(trimmed)
+}
+
+func parseNetscapeCookies(data []byte) ([]*http.Cookie, error) {
+	cookies := make([]*http.Cookie, 0)
+	s := bufio.NewScanner(bytes.NewReader(data))
 	for s.Scan() {
 		raw := strings.TrimSpace(s.Text())
 		if raw == "" {
@@ -73,7 +106,7 @@ func LoadNetscapeCookiesIntoJar(path string, jar http.CookieJar) error {
 			pathPart = "/"
 		}
 
-		ck := &http.Cookie{
+		cookies = append(cookies, &http.Cookie{
 			Name:     name,
 			Value:    value,
 			Path:     pathPart,
@@ -81,16 +114,122 @@ func LoadNetscapeCookiesIntoJar(path string, jar http.CookieJar) error {
 			Secure:   secure,
 			Expires:  expires,
 			HttpOnly: httpOnly,
-		}
-
-		byHost[host] = append(byHost[host], ck)
+		})
 	}
 
 	if err := s.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
-	for host, cookies := range byHost {
+	return cookies, nil
+}
+
+type jsonCookie struct {
+	Name           string           `json:"name"`
+	Value          string           `json:"value"`
+	Domain         string           `json:"domain"`
+	Path           string           `json:"path"`
+	Secure         bool             `json:"secure"`
+	HTTPOnly       bool             `json:"httpOnly"`
+	Session        bool             `json:"session"`
+	ExpirationDate *json.RawMessage `json:"expirationDate"`
+}
+
+type jsonCookieContainer struct {
+	Cookies []jsonCookie `json:"cookies"`
+}
+
+func parseJSONCookies(data []byte) ([]*http.Cookie, error) {
+	var records []jsonCookie
+	if data[0] == '[' {
+		if err := json.Unmarshal(data, &records); err != nil {
+			return nil, err
+		}
+	} else {
+		var container jsonCookieContainer
+		if err := json.Unmarshal(data, &container); err == nil && len(container.Cookies) > 0 {
+			records = container.Cookies
+		} else {
+			var single jsonCookie
+			if err := json.Unmarshal(data, &single); err != nil {
+				return nil, err
+			}
+			records = []jsonCookie{single}
+		}
+	}
+
+	cookies := make([]*http.Cookie, 0, len(records))
+	for _, rc := range records {
+		host := strings.TrimPrefix(strings.TrimSpace(rc.Domain), ".")
+		if host == "" || strings.TrimSpace(rc.Name) == "" {
+			continue
+		}
+		pathPart := strings.TrimSpace(rc.Path)
+		if pathPart == "" {
+			pathPart = "/"
+		}
+
+		cookie := &http.Cookie{
+			Name:     rc.Name,
+			Value:    rc.Value,
+			Path:     pathPart,
+			Domain:   host,
+			Secure:   rc.Secure,
+			HttpOnly: rc.HTTPOnly,
+		}
+
+		if !rc.Session {
+			if exp, ok := parseExpirationSeconds(rc.ExpirationDate); ok {
+				cookie.Expires = time.Unix(exp, 0)
+			}
+		}
+
+		cookies = append(cookies, cookie)
+	}
+	return cookies, nil
+}
+
+func parseExpirationSeconds(raw *json.RawMessage) (int64, bool) {
+	if raw == nil {
+		return 0, false
+	}
+	trimmed := strings.TrimSpace(string(*raw))
+	if trimmed == "" || trimmed == "null" {
+		return 0, false
+	}
+
+	var asInt int64
+	if err := json.Unmarshal(*raw, &asInt); err == nil {
+		if asInt > 0 {
+			return asInt, true
+		}
+		return 0, false
+	}
+
+	var asFloat float64
+	if err := json.Unmarshal(*raw, &asFloat); err == nil {
+		if asFloat > 0 {
+			if asFloat > math.MaxInt64 {
+				return 0, false
+			}
+			return int64(asFloat), true
+		}
+	}
+
+	return 0, false
+}
+
+func setCookiesInJar(jar http.CookieJar, cookies []*http.Cookie) {
+	byHost := map[string][]*http.Cookie{}
+	for _, cookie := range cookies {
+		host := strings.TrimPrefix(cookie.Domain, ".")
+		if host == "" {
+			continue
+		}
+		byHost[host] = append(byHost[host], cookie)
+	}
+
+	for host, hostCookies := range byHost {
 		setFor := map[string]struct{}{}
 		setFor[host] = struct{}{}
 		if !strings.HasPrefix(host, "www.") {
@@ -103,10 +242,8 @@ func LoadNetscapeCookiesIntoJar(path string, jar http.CookieJar) error {
 		for h := range setFor {
 			httpsURL := &url.URL{Scheme: "https", Host: h, Path: "/"}
 			httpURL := &url.URL{Scheme: "http", Host: h, Path: "/"}
-			jar.SetCookies(httpsURL, cookies)
-			jar.SetCookies(httpURL, cookies)
+			jar.SetCookies(httpsURL, hostCookies)
+			jar.SetCookies(httpURL, hostCookies)
 		}
 	}
-
-	return nil
 }

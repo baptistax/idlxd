@@ -15,9 +15,10 @@ import (
 )
 
 func Run(ctx context.Context, cfg config.Config) error {
-	if _, err := os.Stat(cfg.CookiesPath); err != nil {
+	cookiesPath := config.ResolveCookiesPath(cfg.CookiesPath)
+	if _, err := os.Stat(cookiesPath); err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("cookies.txt not found (%s)", cfg.CookiesPath)
+			return fmt.Errorf("cookies.txt not found (%s)", cookiesPath)
 		}
 		return fmt.Errorf("unable to access cookies file: %v", err)
 	}
@@ -27,7 +28,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 	}
 
 	ig, err := instagram.NewClient(instagram.Options{
-		CookiesPath: cfg.CookiesPath,
+		CookiesPath: cookiesPath,
 		UserAgent:   cfg.UserAgent,
 	})
 	if err != nil {

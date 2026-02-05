@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -34,4 +35,19 @@ func ParseArgs(args []string) (Config, error) {
 		OutputRoot:  filepath.Clean(DefaultOutputRoot),
 		UserAgent:   DefaultUserAgent,
 	}, nil
+}
+
+func ResolveCookiesPath(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+
+	if exePath, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exePath), path)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+
+	return filepath.Clean(path)
 }
