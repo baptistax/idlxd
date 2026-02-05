@@ -18,10 +18,8 @@ builds:
     ldflags:
       - -s -w
 
-# Publish raw binaries (no zip/tar)
 archives:
-  - id: default
-    formats: [ 'binary' ]
+  - format: binary
     name_template: "idl_{{ .Os }}_{{ .Arch }}{{ if eq .Os \"windows\" }}.exe{{ end }}"
 
 checksum:
