@@ -4,9 +4,140 @@ import (
 	"bytes"
 	"encoding/xml"
 	"errors"
+	"net/url"
+	"path"
 	"sort"
 	"strings"
 )
+
+// BestImageURLs returns a list of URLs to try for the best-quality image.
+// The list is ordered by resolution (width*height, descending). For each candidate, a "JPEG-normalized"
+// URL is tried first (when applicable), followed by the original URL.
+func BestImageURLs(m Media) []string {
+	type scored struct {
+		url   string
+		score int
+		jpeg  bool
+	}
+
+	cands := make([]scored, 0, len(m.ImageVersions2.Candidates))
+	for _, c := range m.ImageVersions2.Candidates {
+		u := strings.TrimSpace(c.URL)
+		if u == "" {
+			continue
+		}
+		s := c.Width * c.Height
+		cands = append(cands, scored{url: u, score: s, jpeg: looksLikeJPEGURL(u)})
+	}
+	if len(cands) == 0 {
+		best := strings.TrimSpace(BestImageURL(m))
+		if best == "" {
+			return nil
+		}
+		cands = append(cands, scored{url: best, score: 0, jpeg: looksLikeJPEGURL(best)})
+	}
+
+	sort.SliceStable(cands, func(i, j int) bool {
+		if cands[i].score != cands[j].score {
+			return cands[i].score > cands[j].score
+		}
+		if cands[i].jpeg != cands[j].jpeg {
+			return cands[i].jpeg
+		}
+		return cands[i].url < cands[j].url
+	})
+
+	out := make([]string, 0, len(cands)*2)
+	maxAttempts := 10
+	attempts := 0
+	for _, c := range cands {
+		if attempts >= maxAttempts {
+			break
+		}
+		if u := NormalizeImageURLToJPEG(c.url); strings.TrimSpace(u) != "" {
+			out = append(out, u)
+			attempts++
+			if attempts >= maxAttempts {
+				break
+			}
+		}
+		out = append(out, c.url)
+		attempts++
+	}
+
+	// De-duplicate while preserving order.
+	seen := map[string]struct{}{}
+	uniq := make([]string, 0, len(out))
+	for _, u := range out {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			continue
+		}
+		if _, ok := seen[u]; ok {
+			continue
+		}
+		seen[u] = struct{}{}
+		uniq = append(uniq, u)
+	}
+	return uniq
+}
+
+// NormalizeImageURLToJPEG attempts to rewrite an Instagram CDN image URL to a JPEG variant.
+// It preserves query parameters and tries common Instagram/Facebook CDN patterns:
+// - Replace any "dst-webp" token inside the "stp" query param with "dst-jpg".
+// - Replace format=webp with format=jpg (when present).
+// - If the path ends with .webp, replace the path extension with .jpg.
+func NormalizeImageURLToJPEG(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	if u.Path == "" {
+		return raw
+	}
+	lowerPath := strings.ToLower(u.Path)
+	if strings.HasSuffix(lowerPath, ".jpg") || strings.HasSuffix(lowerPath, ".jpeg") {
+		return rewriteQueryForJPEG(u)
+	}
+	if strings.HasSuffix(lowerPath, ".webp") {
+		ext := path.Ext(u.Path)
+		if ext != "" {
+			u.Path = strings.TrimSuffix(u.Path, ext) + ".jpg"
+		}
+	}
+	return rewriteQueryForJPEG(u)
+}
+
+func rewriteQueryForJPEG(u *url.URL) string {
+	q := u.Query()
+	if stp := q.Get("stp"); stp != "" {
+		// Common patterns: dst-webp_e35, dst-webp, ...
+		q.Set("stp", strings.ReplaceAll(stp, "dst-webp", "dst-jpg"))
+	}
+	if f := q.Get("format"); strings.EqualFold(f, "webp") {
+		q.Set("format", "jpg")
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func looksLikeJPEGURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err == nil {
+		p := strings.ToLower(strings.TrimSpace(u.Path))
+		if strings.HasSuffix(p, ".jpg") || strings.HasSuffix(p, ".jpeg") {
+			return true
+		}
+		if stp := strings.ToLower(u.Query().Get("stp")); strings.Contains(stp, "dst-jpg") {
+			return true
+		}
+		if strings.EqualFold(u.Query().Get("format"), "jpg") || strings.EqualFold(u.Query().Get("format"), "jpeg") {
+			return true
+		}
+	}
+	l := strings.ToLower(raw)
+	return strings.Contains(l, "dst-jpg") || strings.HasSuffix(l, ".jpg") || strings.HasSuffix(l, ".jpeg")
+}
 
 func BestImageURL(m Media) string {
 	best := ""

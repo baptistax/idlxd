@@ -195,26 +195,32 @@ func downloadHighlights(ctx context.Context, ig *instagram.Client, dl *downloade
 func downloadMedia(ctx context.Context, dl *downloader.Downloader, safeUser, subdir string, m instagram.Media, idx int) error {
 	url := ""
 	isVideo := false
+	imageURLs := []string(nil)
 
 	if m.MediaType == 2 || m.ProductType == "clips" || m.ProductType == "reels" {
 		url = instagram.BestVideoURL(m)
 		isVideo = true
 	}
 	if url == "" {
-		url = instagram.BestImageURL(m)
+		imageURLs = instagram.BestImageURLs(m)
+		if len(imageURLs) > 0 {
+			url = imageURLs[0]
+		}
 		isVideo = false
 	}
 	if url == "" {
 		return nil
 	}
 
-	ext := utils.ExtFromURL(url)
-	if ext == "" {
-		if isVideo {
+	ext := ""
+	if isVideo {
+		ext = utils.ExtFromURL(url)
+		if ext == "" {
 			ext = ".mp4"
-		} else {
-			ext = ".jpg"
 		}
+	} else {
+		// Force a stable and widely supported image format.
+		ext = ".jpg"
 	}
 
 	ts := "unknown"
@@ -237,8 +243,26 @@ func downloadMedia(ctx context.Context, dl *downloader.Downloader, safeUser, sub
 	name := fmt.Sprintf("%s_%s%s%s", ts, id, part, ext)
 	rel := filepath.Join(safeUser, subdir, name)
 
-	if _, err := dl.DownloadToFile(ctx, url, rel); err != nil {
-		return fmt.Errorf("failed to download %s: %v", name, err)
+	if isVideo {
+		if _, err := dl.DownloadToFile(ctx, url, rel); err != nil {
+			return fmt.Errorf("failed to download %s: %v", name, err)
+		}
+		return nil
+	}
+
+	lastErr := error(nil)
+	if len(imageURLs) == 0 {
+		imageURLs = []string{url}
+	}
+	for _, u := range imageURLs {
+		if _, err := dl.DownloadImageAsJPEG(ctx, u, rel); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	if lastErr != nil {
+		return fmt.Errorf("failed to download %s: %v", name, lastErr)
 	}
 	return nil
 }

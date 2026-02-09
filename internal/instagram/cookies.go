@@ -226,7 +226,12 @@ func setCookiesInJar(jar http.CookieJar, cookies []*http.Cookie) {
 		if host == "" {
 			continue
 		}
-		byHost[host] = append(byHost[host], cookie)
+		// Copy and sanitize before storing in the cookie jar. This avoids net/http logging
+		// about invalid bytes (e.g. '"') when building the Cookie header, while keeping the
+		// effective request behavior identical (net/http would drop those bytes anyway).
+		c := *cookie
+		c.Value = sanitizeCookieValueForRequest(c.Value)
+		byHost[host] = append(byHost[host], &c)
 	}
 
 	for host, hostCookies := range byHost {
@@ -246,4 +251,33 @@ func setCookiesInJar(jar http.CookieJar, cookies []*http.Cookie) {
 			jar.SetCookies(httpURL, hostCookies)
 		}
 	}
+}
+
+// sanitizeCookieValueForRequest removes bytes that are not valid cookie-octets (RFC 6265).
+// Go's net/http will drop these bytes when serializing cookies and may emit a log line.
+// Performing the sanitization at load time prevents noisy logs without changing what gets sent.
+func sanitizeCookieValueForRequest(v string) string {
+	if v == "" {
+		return v
+	}
+	// Fast path: if the string is already valid ASCII cookie-octets, return as-is.
+	out := make([]byte, 0, len(v))
+	changed := false
+	for i := 0; i < len(v); i++ {
+		b := v[i]
+		if isCookieOctet(b) {
+			out = append(out, b)
+			continue
+		}
+		changed = true
+	}
+	if !changed {
+		return v
+	}
+	return string(out)
+}
+
+func isCookieOctet(b byte) bool {
+	// Matches net/http's cookie-octet checks.
+	return b == 0x21 || (b >= 0x23 && b <= 0x2B) || (b >= 0x2D && b <= 0x3A) || (b >= 0x3C && b <= 0x5B) || (b >= 0x5D && b <= 0x7E)
 }

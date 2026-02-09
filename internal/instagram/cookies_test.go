@@ -65,7 +65,9 @@ func TestParseCookies_NetscapeAndJarConstruction(t *testing.T) {
 	for _, c := range stored {
 		if c.Name == "sessionid" {
 			foundSession = true
-			if c.Value != `abc"def` {
+			// Cookie values are sanitized when loaded into the jar to avoid noisy net/http logs.
+			// net/http would drop invalid bytes (like '"') when serializing the Cookie header.
+			if c.Value != `abcdef` {
 				t.Fatalf("unexpected sessionid value: %q", c.Value)
 			}
 		}
