@@ -57,14 +57,6 @@ func NewClient(opts Options) (*Client, error) {
 	return cl, nil
 }
 
-func (c *Client) FetchProfile(ctx context.Context, username string) (Profile, error) {
-	username = strings.TrimSpace(username)
-	if username == "" {
-		return Profile{}, errors.New("usage: idl <username>")
-	}
-	return Profile{Username: username}, nil
-}
-
 func (c *Client) EnsureTokens(ctx context.Context) error {
 	if c.lsd != "" && c.fbDtsg != "" {
 		return nil
@@ -168,10 +160,76 @@ func (c *Client) GraphQL(ctx context.Context, referer, friendlyName, docID strin
 		return err
 	}
 
-	if err := json.Unmarshal(b, out); err != nil {
-		return errors.New("unexpected Instagram response")
+	if err := decodeGraphQLResponse(b, out); err != nil {
+		return err
 	}
 	return nil
+}
+
+type graphQLErrorPayload struct {
+	Status     string `json:"status"`
+	Message    string `json:"message"`
+	ErrorTitle string `json:"error_title"`
+	ErrorType  string `json:"error_type"`
+	Errors     []struct {
+		Message string `json:"message"`
+		Summary string `json:"summary"`
+	} `json:"errors"`
+}
+
+func decodeGraphQLResponse(body []byte, out any) error {
+	var payload graphQLErrorPayload
+	if err := json.Unmarshal(body, &payload); err == nil {
+		if msg := payload.bestMessage(); msg != "" {
+			if payload.hasErrors() || (payload.Status != "" && !strings.EqualFold(payload.Status, "ok")) {
+				return fmt.Errorf("Instagram error: %s", msg)
+			}
+		} else if payload.Status != "" && !strings.EqualFold(payload.Status, "ok") {
+			return fmt.Errorf("Instagram returned status %q", payload.Status)
+		}
+	}
+
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("unexpected Instagram response: %s", compactResponseSnippet(body, 200))
+	}
+	return nil
+}
+
+func (p graphQLErrorPayload) hasErrors() bool {
+	return len(p.Errors) > 0 || strings.TrimSpace(p.Message) != "" || strings.TrimSpace(p.ErrorTitle) != "" || strings.TrimSpace(p.ErrorType) != ""
+}
+
+func (p graphQLErrorPayload) bestMessage() string {
+	if msg := strings.TrimSpace(p.Message); msg != "" {
+		return msg
+	}
+	if title := strings.TrimSpace(p.ErrorTitle); title != "" {
+		return title
+	}
+	if typ := strings.TrimSpace(p.ErrorType); typ != "" {
+		return typ
+	}
+	for _, item := range p.Errors {
+		if msg := strings.TrimSpace(item.Message); msg != "" {
+			return msg
+		}
+		if summary := strings.TrimSpace(item.Summary); summary != "" {
+			return summary
+		}
+	}
+	return ""
+}
+
+func compactResponseSnippet(body []byte, limit int) string {
+	s := strings.TrimSpace(string(body))
+	if s == "" {
+		return "<empty>"
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	if limit > 0 && len(s) > limit {
+		return s[:limit] + "..."
+	}
+	return s
 }
 
 func (c *Client) applyCommonHeaders(req *http.Request, referer string) {

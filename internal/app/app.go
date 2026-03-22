@@ -15,6 +15,7 @@ import (
 )
 
 func Run(ctx context.Context, cfg config.Config) error {
+	startedAt := time.Now()
 	cookiesPath := config.ResolveCookiesPath(cfg.CookiesPath)
 	if _, err := os.Stat(cookiesPath); err != nil {
 		if os.IsNotExist(err) {
@@ -40,6 +41,9 @@ func Run(ctx context.Context, cfg config.Config) error {
 		UserAgent: cfg.UserAgent,
 		Referer:   "https://www.instagram.com/",
 	})
+	pacer := NewPacer(150*time.Millisecond, 350*time.Millisecond)
+	pacer.Start()
+	defer pacer.Stop()
 
 	profile, err := ig.FetchProfile(ctx, cfg.Username)
 	if err != nil {
@@ -56,29 +60,46 @@ func Run(ctx context.Context, cfg config.Config) error {
 		return fmt.Errorf("unable to create user output directory (%s): %v", userRoot, err)
 	}
 
-	fmt.Printf("Target: %s\n", profile.Username)
-	fmt.Printf("Output: %s\n\n", userRoot)
+	printBanner()
+	printKV("Target", profile.Username)
+	printKV("Output", userRoot)
+	if profile.UserID != "" {
+		printKV("Profile ID", profile.UserID)
+	}
+	fmt.Println()
 
 	firstErr := error(nil)
+	userID := profile.UserID
 
-	userID, err := downloadTimeline(ctx, ig, dl, safeUser, profile.Username)
+	timelineUserID, err := downloadTimeline(ctx, ig, dl, pacer, safeUser, profile.Username)
 	if err != nil && firstErr == nil {
 		firstErr = err
 	}
+	if userID == "" {
+		userID = timelineUserID
+	}
 
 	if userID != "" {
-		if err := downloadHighlights(ctx, ig, dl, safeUser, profile.Username, userID); err != nil && firstErr == nil {
+		if err := downloadHighlights(ctx, ig, dl, pacer, safeUser, profile.Username, userID); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	} else if firstErr == nil {
 		firstErr = errors.New("failed to resolve profile id")
 	}
 
+	printFooter(time.Since(startedAt), firstErr == nil)
 	return firstErr
 }
 
-func downloadTimeline(ctx context.Context, ig *instagram.Client, dl *downloader.Downloader, safeUser, username string) (string, error) {
-	fmt.Println("Downloading posts/reels...")
+func downloadTimeline(ctx context.Context, ig *instagram.Client, dl *downloader.Downloader, pacer *Pacer, safeUser, username string) (string, error) {
+	printSectionHeader(1, 2, "Posts / Reels")
+	var progress *Progress
+	defer func() {
+		if progress != nil {
+			progress.Finish()
+		}
+	}()
+
 	after := ""
 	userID := ""
 	firstErr := error(nil)
@@ -100,18 +121,26 @@ func downloadTimeline(ctx context.Context, ig *instagram.Client, dl *downloader.
 		}
 
 		for _, m := range items {
-			if err := downloadMedia(ctx, dl, safeUser, "posts", m, 0); err != nil && firstErr == nil {
-				firstErr = err
-			} else if err == nil {
-				downloaded++
+			jobs := timelineMediaJobs(m)
+			if len(jobs) > 0 && progress == nil {
+				progress = NewProgress("POSTS / REELS")
+				progress.Start()
 			}
-
-			if len(m.CarouselMedia) > 0 {
-				for i, cm := range m.CarouselMedia {
-					if err := downloadMedia(ctx, dl, safeUser, "posts", cm, i+1); err != nil && firstErr == nil {
+			if progress != nil {
+				progress.AddTotal(len(jobs))
+			}
+			for _, job := range jobs {
+				if err := downloadMedia(ctx, dl, pacer, safeUser, "posts", job.media, job.idx); err != nil {
+					if firstErr == nil {
 						firstErr = err
-					} else if err == nil {
-						downloaded++
+					}
+					if progress != nil {
+						progress.IncFail()
+					}
+				} else {
+					downloaded++
+					if progress != nil {
+						progress.IncOK()
 					}
 				}
 			}
@@ -124,31 +153,59 @@ func downloadTimeline(ctx context.Context, ig *instagram.Client, dl *downloader.
 		time.Sleep(250 * time.Millisecond)
 	}
 
-	fmt.Printf("Posts/Reels: %d files\n", downloaded)
+	failed := 0
+	if progress != nil {
+		failed = progress.Failed()
+		progress.Finish()
+		progress = nil
+	}
+	printSectionSummary(downloaded, failed)
 	return userID, firstErr
 }
 
-func downloadHighlights(ctx context.Context, ig *instagram.Client, dl *downloader.Downloader, safeUser, username, userID string) error {
-	fmt.Println("Downloading highlights...")
+type timelineMediaJob struct {
+	media instagram.Media
+	idx   int
+}
+
+func timelineMediaJobs(m instagram.Media) []timelineMediaJob {
+	if len(m.CarouselMedia) == 0 {
+		return []timelineMediaJob{{media: m}}
+	}
+
+	jobs := make([]timelineMediaJob, 0, len(m.CarouselMedia))
+	for i, cm := range m.CarouselMedia {
+		jobs = append(jobs, timelineMediaJob{
+			media: cm,
+			idx:   i + 1,
+		})
+	}
+	return jobs
+}
+
+func downloadHighlights(ctx context.Context, ig *instagram.Client, dl *downloader.Downloader, pacer *Pacer, safeUser, username, userID string) error {
+	printSectionHeader(2, 2, "Highlights")
+	var progress *Progress
+	defer func() {
+		if progress != nil {
+			progress.Finish()
+		}
+	}()
+
 	hs, err := ig.FetchHighlightsTray(ctx, username, userID)
 	if err != nil {
 		return err
 	}
 	if len(hs) == 0 {
-		fmt.Println("Highlights: 0 files")
+		printSectionSummary(0, 0)
 		return nil
 	}
 
-	idToTitle := map[string]string{}
 	reelIDs := make([]string, 0, len(hs))
 	for _, h := range hs {
 		reelIDs = append(reelIDs, h.ID)
-		title := utils.SanitizePathSegment(h.Title)
-		if title == "" {
-			title = "highlight"
-		}
-		idToTitle[h.ID] = title
 	}
+	idToTitle := highlightDirNames(hs)
 
 	after := ""
 	firstErr := error(nil)
@@ -172,11 +229,26 @@ func downloadHighlights(ctx context.Context, ig *instagram.Client, dl *downloade
 				title = "highlight"
 			}
 			subdir := filepath.Join("highlights", title)
+			if len(r.Items) > 0 && progress == nil {
+				progress = NewProgress("HIGHLIGHTS")
+				progress.Start()
+			}
+			if progress != nil {
+				progress.AddTotal(len(r.Items))
+			}
 			for i, item := range r.Items {
-				if err := downloadMedia(ctx, dl, safeUser, subdir, item, i+1); err != nil && firstErr == nil {
-					firstErr = err
-				} else if err == nil {
+				if err := downloadMedia(ctx, dl, pacer, safeUser, subdir, item, i+1); err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+					if progress != nil {
+						progress.IncFail()
+					}
+				} else {
 					downloaded++
+					if progress != nil {
+						progress.IncOK()
+					}
 				}
 			}
 		}
@@ -188,11 +260,59 @@ func downloadHighlights(ctx context.Context, ig *instagram.Client, dl *downloade
 		time.Sleep(250 * time.Millisecond)
 	}
 
-	fmt.Printf("Highlights: %d files\n", downloaded)
+	failed := 0
+	if progress != nil {
+		failed = progress.Failed()
+		progress.Finish()
+		progress = nil
+	}
+	printSectionSummary(downloaded, failed)
 	return firstErr
 }
 
-func downloadMedia(ctx context.Context, dl *downloader.Downloader, safeUser, subdir string, m instagram.Media, idx int) error {
+func highlightDirNames(hs []instagram.Highlight) map[string]string {
+	baseCounts := make(map[string]int, len(hs))
+	for _, h := range hs {
+		baseCounts[highlightDirBaseName(h.Title)]++
+	}
+
+	dirs := make(map[string]string, len(hs))
+	used := make(map[string]struct{}, len(hs))
+	for _, h := range hs {
+		base := highlightDirBaseName(h.Title)
+		name := base
+		if baseCounts[base] > 1 {
+			name = fmt.Sprintf("%s_%s", base, utils.SanitizePathSegment(h.ID))
+		}
+		for suffix := 2; ; suffix++ {
+			if _, exists := used[name]; !exists {
+				break
+			}
+			name = fmt.Sprintf("%s_%02d", base, suffix)
+		}
+		used[name] = struct{}{}
+		dirs[h.ID] = name
+	}
+	return dirs
+}
+
+func highlightDirBaseName(title string) string {
+	name := utils.SanitizePathSegment(title)
+	if name == "" {
+		return "highlight"
+	}
+	return name
+}
+
+func downloadMedia(ctx context.Context, dl *downloader.Downloader, pacer *Pacer, safeUser, subdir string, m instagram.Media, idx int) error {
+	id := m.PK
+	if id == "" {
+		id = m.ID
+	}
+	if id == "" {
+		id = "media"
+	}
+
 	url := ""
 	isVideo := false
 	imageURLs := []string(nil)
@@ -209,7 +329,7 @@ func downloadMedia(ctx context.Context, dl *downloader.Downloader, safeUser, sub
 		isVideo = false
 	}
 	if url == "" {
-		return nil
+		return fmt.Errorf("media %s has no downloadable URL", id)
 	}
 
 	ext := ""
@@ -227,13 +347,6 @@ func downloadMedia(ctx context.Context, dl *downloader.Downloader, safeUser, sub
 	if m.TakenAt > 0 {
 		ts = time.Unix(m.TakenAt, 0).UTC().Format("20060102_150405")
 	}
-	id := m.PK
-	if id == "" {
-		id = m.ID
-	}
-	if id == "" {
-		id = "media"
-	}
 
 	part := ""
 	if idx > 0 {
@@ -244,6 +357,9 @@ func downloadMedia(ctx context.Context, dl *downloader.Downloader, safeUser, sub
 	rel := filepath.Join(safeUser, subdir, name)
 
 	if isVideo {
+		if err := waitForDownloadTurn(ctx, pacer); err != nil {
+			return err
+		}
 		if _, err := dl.DownloadToFile(ctx, url, rel); err != nil {
 			return fmt.Errorf("failed to download %s: %v", name, err)
 		}
@@ -255,6 +371,10 @@ func downloadMedia(ctx context.Context, dl *downloader.Downloader, safeUser, sub
 		imageURLs = []string{url}
 	}
 	for _, u := range imageURLs {
+		if err := waitForDownloadTurn(ctx, pacer); err != nil {
+			lastErr = err
+			break
+		}
 		if _, err := dl.DownloadImageAsJPEG(ctx, u, rel); err != nil {
 			lastErr = err
 			continue
@@ -265,4 +385,11 @@ func downloadMedia(ctx context.Context, dl *downloader.Downloader, safeUser, sub
 		return fmt.Errorf("failed to download %s: %v", name, lastErr)
 	}
 	return nil
+}
+
+func waitForDownloadTurn(ctx context.Context, pacer *Pacer) error {
+	if pacer == nil {
+		return nil
+	}
+	return pacer.Wait(ctx)
 }

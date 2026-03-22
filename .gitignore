@@ -9,3 +9,4 @@ cookies.txt
 # Release artifacts
 /dist/
 idl
+idl.exe

@@ -106,6 +106,8 @@ func (p *Progress) line() string {
 	done := p.done
 	total := p.total
 	failed := p.failed
+	label := p.label
+	startedAt := p.startedAt
 	p.mu.Unlock()
 
 	pct := 0
@@ -115,14 +117,55 @@ func (p *Progress) line() string {
 			pct = 100
 		}
 	}
-	if p.label == "" {
-		return fmt.Sprintf("%d/%d (%d%%)", done, total, pct)
+
+	bar := renderProgressBar(done, total, 24)
+	elapsed := formatElapsed(time.Since(startedAt))
+
+	if label == "" {
+		line := fmt.Sprintf("%s %3d%% %d/%d %s", bar, pct, done, total, elapsed)
+		if failed > 0 {
+			line += fmt.Sprintf(" fail:%d", failed)
+		}
+		return line
 	}
-	line := fmt.Sprintf("%s... %d/%d (%d%%)", p.label, done, total, pct)
+
+	line := fmt.Sprintf("%-14s %s %3d%% %d/%d %s", label, bar, pct, done, total, elapsed)
 	if failed > 0 {
-		line += fmt.Sprintf(" [fail: %d]", failed)
+		line += fmt.Sprintf(" fail:%d", failed)
 	}
 	return line
+}
+
+func renderProgressBar(done, total, width int) string {
+	if width <= 0 {
+		width = 20
+	}
+
+	filled := 0
+	if total > 0 {
+		filled = int(float64(done) / float64(total) * float64(width))
+		if filled > width {
+			filled = width
+		}
+	}
+
+	return "[" + strings.Repeat("#", filled) + strings.Repeat(".", width-filled) + "]"
+}
+
+func formatElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	d = d.Round(time.Second)
+
+	hours := int(d / time.Hour)
+	minutes := int(d/time.Minute) % 60
+	seconds := int(d/time.Second) % 60
+
+	if hours > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds)
+	}
+	return fmt.Sprintf("%02d:%02d", minutes, seconds)
 }
 
 func isStdoutTTY() bool {

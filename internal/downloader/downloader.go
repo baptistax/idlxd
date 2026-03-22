@@ -88,13 +88,20 @@ func (d *Downloader) DownloadToFile(ctx context.Context, url, relPath string) (s
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
 
 	if _, err := io.Copy(f, resp.Body); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		return "", err
 	}
 
-	if err := os.Rename(tmpPath, outPath); err != nil {
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+
+	if err := renameReplace(tmpPath, outPath); err != nil {
+		_ = os.Remove(tmpPath)
 		return "", err
 	}
 
