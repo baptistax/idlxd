@@ -1,9 +1,19 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/baptistax/idl/internal/downloader"
 	"github.com/baptistax/idl/internal/instagram"
 )
 
@@ -67,11 +77,87 @@ func TestHighlightDirNamesDisambiguatesDuplicateTitles(t *testing.T) {
 func TestDownloadMediaErrorsWhenMediaHasNoURL(t *testing.T) {
 	t.Parallel()
 
-	err := downloadMedia(context.Background(), nil, nil, "user", "posts", instagram.Media{PK: "missing"}, 0)
+	err := downloadMedia(context.Background(), nil, nil, nil, "user", "user", "posts", instagram.Media{PK: "missing", MediaType: 2, ProductType: "clips"}, 0)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if got := err.Error(); got != "media missing has no downloadable URL" {
+	if got := err.Error(); got != "media missing is a video but has no downloadable video URL" {
 		t.Fatalf("unexpected error: %q", got)
 	}
+}
+
+func TestResolveDownloadMediaHydratesReelWhenVideoURLMissing(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	initial := instagram.Media{PK: "9001", Code: "ABC123", MediaType: 2, ProductType: "clips"}
+	hydrated, isVideo, err := resolveDownloadMedia(context.Background(), "kemillynicolle_", initial, func(ctx context.Context, username, mediaPK, mediaCode string) (instagram.Media, error) {
+		called = true
+		if username != "kemillynicolle_" || mediaPK != "9001" || mediaCode != "ABC123" {
+			t.Fatalf("unexpected hydrate args: %q %q %q", username, mediaPK, mediaCode)
+		}
+		return instagram.Media{
+			PK:            mediaPK,
+			Code:          mediaCode,
+			MediaType:     2,
+			ProductType:   "clips",
+			VideoVersions: []instagram.Candidate{{URL: "https://example.test/video.mp4", Width: 720, Height: 1280}},
+		}, nil
+	})
+	if err != nil {
+		t.Fatalf("resolveDownloadMedia: %v", err)
+	}
+	if !called {
+		t.Fatal("expected hydrator to be called")
+	}
+	if !isVideo {
+		t.Fatal("expected video media")
+	}
+	if got := instagram.BestVideoURL(hydrated); got != "https://example.test/video.mp4" {
+		t.Fatalf("unexpected best video url: %q", got)
+	}
+}
+
+func TestDownloadMediaUsesImageFlowForImages(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(testJPEGBytes(t))
+	}))
+	defer srv.Close()
+
+	dl := downloader.New(downloader.Options{
+		OutputDir: dir,
+		Timeout:   5 * time.Second,
+	})
+
+	m := instagram.Media{
+		PK:             "img1",
+		TakenAt:        1710000000,
+		ImageVersions2: instagram.ImageVersions2{Candidates: []instagram.Candidate{{URL: srv.URL, Width: 800, Height: 800}}},
+		MediaType:      1,
+		ProductType:    "feed",
+	}
+	if err := downloadMedia(context.Background(), nil, dl, nil, "user", "user", "posts", m, 0); err != nil {
+		t.Fatalf("downloadMedia: %v", err)
+	}
+
+	want := filepath.Join(dir, "user", "posts", time.Unix(1710000000, 0).UTC().Format("20060102_150405")+"_img1.jpg")
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("expected output file: %v", err)
+	}
+}
+
+func testJPEGBytes(t *testing.T) []byte {
+	t.Helper()
+
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95}); err != nil {
+		t.Fatalf("jpeg.Encode: %v", err)
+	}
+	return buf.Bytes()
 }

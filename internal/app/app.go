@@ -71,7 +71,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 	firstErr := error(nil)
 	userID := profile.UserID
 
-	timelineUserID, err := downloadTimeline(ctx, ig, dl, pacer, safeUser, profile.Username)
+	timelineUserID, err := downloadTimeline(ctx, ig, dl, pacer, safeUser, profile.Username, profile.UserID)
 	if err != nil && firstErr == nil {
 		firstErr = err
 	}
@@ -91,7 +91,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 	return firstErr
 }
 
-func downloadTimeline(ctx context.Context, ig *instagram.Client, dl *downloader.Downloader, pacer *Pacer, safeUser, username string) (string, error) {
+func downloadTimeline(ctx context.Context, ig *instagram.Client, dl *downloader.Downloader, pacer *Pacer, safeUser, username, initialUserID string) (string, error) {
 	printSectionHeader(1, 2, "Posts / Reels")
 	var progress *Progress
 	defer func() {
@@ -101,9 +101,36 @@ func downloadTimeline(ctx context.Context, ig *instagram.Client, dl *downloader.
 	}()
 
 	after := ""
-	userID := ""
+	userID := initialUserID
 	firstErr := error(nil)
 	downloaded := 0
+	processItems := func(items []instagram.Media, subdir string) {
+		for _, m := range items {
+			jobs := timelineMediaJobs(m)
+			if len(jobs) > 0 && progress == nil {
+				progress = NewProgress("POSTS / REELS")
+				progress.Start()
+			}
+			if progress != nil {
+				progress.AddTotal(len(jobs))
+			}
+			for _, job := range jobs {
+				if err := downloadMedia(ctx, ig, dl, pacer, safeUser, username, subdir, job.media, job.idx); err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+					if progress != nil {
+						progress.IncFail()
+					}
+				} else {
+					downloaded++
+					if progress != nil {
+						progress.IncOK()
+					}
+				}
+			}
+		}
+	}
 
 	for {
 		select {
@@ -119,38 +146,36 @@ func downloadTimeline(ctx context.Context, ig *instagram.Client, dl *downloader.
 		if userID == "" && uid != "" {
 			userID = uid
 		}
-
-		for _, m := range items {
-			jobs := timelineMediaJobs(m)
-			if len(jobs) > 0 && progress == nil {
-				progress = NewProgress("POSTS / REELS")
-				progress.Start()
-			}
-			if progress != nil {
-				progress.AddTotal(len(jobs))
-			}
-			for _, job := range jobs {
-				if err := downloadMedia(ctx, dl, pacer, safeUser, "posts", job.media, job.idx); err != nil {
-					if firstErr == nil {
-						firstErr = err
-					}
-					if progress != nil {
-						progress.IncFail()
-					}
-				} else {
-					downloaded++
-					if progress != nil {
-						progress.IncOK()
-					}
-				}
-			}
-		}
+		processItems(items, "posts")
 
 		if !pageInfo.HasNextPage || pageInfo.EndCursor == "" {
 			break
 		}
 		after = pageInfo.EndCursor
 		time.Sleep(250 * time.Millisecond)
+	}
+
+	if userID != "" {
+		after = ""
+		for {
+			select {
+			case <-ctx.Done():
+				return userID, ctx.Err()
+			default:
+			}
+
+			items, pageInfo, err := ig.FetchReelsPage(ctx, username, userID, after)
+			if err != nil {
+				return userID, err
+			}
+			processItems(items, "reels")
+
+			if !pageInfo.HasNextPage || pageInfo.EndCursor == "" {
+				break
+			}
+			after = pageInfo.EndCursor
+			time.Sleep(250 * time.Millisecond)
+		}
 	}
 
 	failed := 0
@@ -237,7 +262,7 @@ func downloadHighlights(ctx context.Context, ig *instagram.Client, dl *downloade
 				progress.AddTotal(len(r.Items))
 			}
 			for i, item := range r.Items {
-				if err := downloadMedia(ctx, dl, pacer, safeUser, subdir, item, i+1); err != nil {
+				if err := downloadMedia(ctx, ig, dl, pacer, safeUser, username, subdir, item, i+1); err != nil {
 					if firstErr == nil {
 						firstErr = err
 					}
@@ -304,7 +329,7 @@ func highlightDirBaseName(title string) string {
 	return name
 }
 
-func downloadMedia(ctx context.Context, dl *downloader.Downloader, pacer *Pacer, safeUser, subdir string, m instagram.Media, idx int) error {
+func downloadMedia(ctx context.Context, ig *instagram.Client, dl *downloader.Downloader, pacer *Pacer, safeUser, username, subdir string, m instagram.Media, idx int) error {
 	id := m.PK
 	if id == "" {
 		id = m.ID
@@ -313,20 +338,30 @@ func downloadMedia(ctx context.Context, dl *downloader.Downloader, pacer *Pacer,
 		id = "media"
 	}
 
+	resolved, isVideo, err := resolveDownloadMedia(ctx, username, m, func(ctx context.Context, username, mediaPK, mediaCode string) (instagram.Media, error) {
+		if ig == nil {
+			return instagram.Media{}, fmt.Errorf("media %s is a video but has no downloadable video URL", id)
+		}
+		return ig.FetchMediaInfo(ctx, username, mediaPK, mediaCode)
+	})
+	if err != nil {
+		return err
+	}
+
 	url := ""
-	isVideo := false
 	imageURLs := []string(nil)
 
-	if m.MediaType == 2 || m.ProductType == "clips" || m.ProductType == "reels" {
-		url = instagram.BestVideoURL(m)
-		isVideo = true
+	if isVideo {
+		url = instagram.BestVideoURL(resolved)
+		if url == "" {
+			return fmt.Errorf("media %s is a video but has no downloadable video URL", id)
+		}
 	}
 	if url == "" {
-		imageURLs = instagram.BestImageURLs(m)
+		imageURLs = instagram.BestImageURLs(resolved)
 		if len(imageURLs) > 0 {
 			url = imageURLs[0]
 		}
-		isVideo = false
 	}
 	if url == "" {
 		return fmt.Errorf("media %s has no downloadable URL", id)
@@ -385,6 +420,31 @@ func downloadMedia(ctx context.Context, dl *downloader.Downloader, pacer *Pacer,
 		return fmt.Errorf("failed to download %s: %v", name, lastErr)
 	}
 	return nil
+}
+
+type mediaHydrator func(context.Context, string, string, string) (instagram.Media, error)
+
+func resolveDownloadMedia(ctx context.Context, username string, m instagram.Media, hydrate mediaHydrator) (instagram.Media, bool, error) {
+	if !isVideoMedia(m) {
+		return m, false, nil
+	}
+
+	if instagram.BestVideoURL(m) != "" {
+		return m, true, nil
+	}
+	if hydrate == nil || m.PK == "" {
+		return m, true, nil
+	}
+
+	hydrated, err := hydrate(ctx, username, m.PK, m.Code)
+	if err != nil {
+		return m, true, err
+	}
+	return hydrated, true, nil
+}
+
+func isVideoMedia(m instagram.Media) bool {
+	return m.MediaType == 2 || m.ProductType == "clips" || m.ProductType == "reels"
 }
 
 func waitForDownloadTurn(ctx context.Context, pacer *Pacer) error {
