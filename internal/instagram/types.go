@@ -1,8 +1,11 @@
 package instagram
 
 type Profile struct {
-	Username string
-	UserID   string
+	Username        string
+	UserID          string
+	IsPrivate       bool
+	PostsCount      int
+	PostsCountKnown bool
 }
 
 type Candidate struct {

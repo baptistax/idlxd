@@ -72,26 +72,35 @@ func (c *Client) FetchHighlightsPage(ctx context.Context, username string, reelI
 	if len(reelIDs) == 0 {
 		return nil, PageInfo{}, errors.New("no highlights")
 	}
-	if first <= 0 {
-		first = 10
-	}
 	referer := fmt.Sprintf("%s/%s/", baseWWW, username)
 
+	friendlyName := "PolarisStoriesV3HighlightsPageQuery"
+	docID := docHighlightsPage
 	vars := map[string]any{
-		"after":           nil,
-		"before":          nil,
-		"first":           first,
 		"initial_reel_id": reelIDs[0],
-		"is_highlight":    true,
-		"last":            nil,
 		"reel_ids":        reelIDs,
+		"first":           3,
+		"last":            2,
 	}
 	if after != "" {
-		vars["after"] = after
+		if first <= 0 {
+			first = 2
+		}
+		friendlyName = "PolarisStoriesV3HighlightsPagePaginationQuery"
+		docID = docHighlightsPageConn
+		vars = map[string]any{
+			"after":           after,
+			"before":          nil,
+			"first":           first,
+			"initial_reel_id": reelIDs[0],
+			"is_highlight":    true,
+			"last":            nil,
+			"reel_ids":        reelIDs,
+		}
 	}
 
 	var out highlightsPageResponse
-	if err := c.GraphQL(ctx, referer, "PolarisStoriesV3HighlightsPagePaginationQuery", docHighlightsPageConn, vars, &out); err != nil {
+	if err := c.GraphQL(ctx, referer, friendlyName, docID, vars, &out); err != nil {
 		return nil, PageInfo{}, err
 	}
 

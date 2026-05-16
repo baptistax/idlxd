@@ -28,6 +28,8 @@ func (c *Client) FetchPostsPage(ctx context.Context, username string, after stri
 
 	if after == "" {
 		vars := map[string]any{
+			"__relay_internal__pv__PolarisAIGMAccountLabelEnabledrelayprovider":      false,
+			"__relay_internal__pv__PolarisImmersiveFeedChainingEnabledrelayprovider": false,
 			"data": map[string]any{
 				"count":                             12,
 				"include_reel_media_seen_timestamp": true,
@@ -46,6 +48,8 @@ func (c *Client) FetchPostsPage(ctx context.Context, username string, after stri
 	}
 
 	vars := map[string]any{
+		"__relay_internal__pv__PolarisAIGMAccountLabelEnabledrelayprovider":      false,
+		"__relay_internal__pv__PolarisImmersiveFeedChainingEnabledrelayprovider": false,
 		"after":  after,
 		"before": nil,
 		"data": map[string]any{

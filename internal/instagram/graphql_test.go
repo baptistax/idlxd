@@ -41,6 +41,25 @@ func TestDecodeGraphQLResponseDecodesSuccessfulPayload(t *testing.T) {
 	}
 }
 
+func TestDecodeGraphQLResponseAcceptsJavaScriptPrefix(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`for (;;);{"status":"ok","data":{"value":42}}`)
+	var out struct {
+		Status string `json:"status"`
+		Data   struct {
+			Value int `json:"value"`
+		} `json:"data"`
+	}
+
+	if err := decodeGraphQLResponse(body, &out); err != nil {
+		t.Fatalf("decodeGraphQLResponse: %v", err)
+	}
+	if out.Data.Value != 42 {
+		t.Fatalf("unexpected output: %+v", out)
+	}
+}
+
 func TestReelsResponseParsesMediaAndPageInfo(t *testing.T) {
 	t.Parallel()
 
@@ -72,6 +91,30 @@ func TestReelsResponseParsesMediaAndPageInfo(t *testing.T) {
 	}
 	if !out.Data.Connection.PageInfo.HasNextPage {
 		t.Fatal("expected has_next_page")
+	}
+}
+
+func TestReelsResponseHandlesEmptyResponse(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"data":{
+			"xdt_api__v1__clips__user__connection_v2":{
+				"edges":[],
+				"page_info":{"end_cursor":"","has_next_page":false}
+			}
+		}
+	}`)
+
+	var out reelsResponse
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("unmarshal reels payload: %v", err)
+	}
+	if len(out.Data.Connection.Edges) != 0 {
+		t.Fatalf("unexpected edge count: %d", len(out.Data.Connection.Edges))
+	}
+	if out.Data.Connection.PageInfo.HasNextPage {
+		t.Fatal("expected no next page")
 	}
 }
 

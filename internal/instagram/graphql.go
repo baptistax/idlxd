@@ -101,6 +101,14 @@ func (c *Client) EnsureTokens(ctx context.Context) error {
 }
 
 func (c *Client) GraphQL(ctx context.Context, referer, friendlyName, docID string, variables any, out any) error {
+	return c.graphQL(ctx, gqlURL, referer, friendlyName, docID, variables, out)
+}
+
+func (c *Client) GraphQLAPI(ctx context.Context, referer, friendlyName, docID string, variables any, out any) error {
+	return c.graphQL(ctx, gqlAPIURL, referer, friendlyName, docID, variables, out)
+}
+
+func (c *Client) graphQL(ctx context.Context, endpoint, referer, friendlyName, docID string, variables any, out any) error {
 	if err := c.EnsureTokens(ctx); err != nil {
 		return err
 	}
@@ -126,7 +134,7 @@ func (c *Client) GraphQL(ctx context.Context, referer, friendlyName, docID strin
 		form.Set("av", c.dsUserID)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gqlURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
 	}
@@ -137,6 +145,7 @@ func (c *Client) GraphQL(ctx context.Context, referer, friendlyName, docID strin
 
 	c.applyCommonHeaders(req, referer)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-FB-Friendly-Name", friendlyName)
 	req.Header.Set("X-FB-LSD", c.lsd)
 	req.Header.Set("X-IG-App-ID", igAppID)
 	req.Header.Set("X-ASBD-ID", asbdID)
@@ -178,6 +187,8 @@ type graphQLErrorPayload struct {
 }
 
 func decodeGraphQLResponse(body []byte, out any) error {
+	body = normalizeGraphQLJSON(body)
+
 	var payload graphQLErrorPayload
 	if err := json.Unmarshal(body, &payload); err == nil {
 		if msg := payload.bestMessage(); msg != "" {
@@ -190,9 +201,29 @@ func decodeGraphQLResponse(body []byte, out any) error {
 	}
 
 	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("unexpected Instagram response: %s", compactResponseSnippet(body, 200))
+		return errors.New("unexpected Instagram response")
 	}
 	return nil
+}
+
+func normalizeGraphQLJSON(body []byte) []byte {
+	s := strings.TrimSpace(string(body))
+	for {
+		switch {
+		case strings.HasPrefix(s, "for (;;);"):
+			s = strings.TrimSpace(strings.TrimPrefix(s, "for (;;);"))
+		case strings.HasPrefix(s, "while(1);"):
+			s = strings.TrimSpace(strings.TrimPrefix(s, "while(1);"))
+		case strings.HasPrefix(s, ")]}'"):
+			if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+				s = strings.TrimSpace(s[idx+1:])
+			} else {
+				s = strings.TrimSpace(strings.TrimPrefix(s, ")]}'"))
+			}
+		default:
+			return []byte(s)
+		}
+	}
 }
 
 func (p graphQLErrorPayload) hasErrors() bool {

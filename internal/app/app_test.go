@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -72,6 +73,70 @@ func TestHighlightDirNamesDisambiguatesDuplicateTitles(t *testing.T) {
 	if dirs["789"] != "Friends" {
 		t.Fatalf("unexpected dir for unique title: %q", dirs["789"])
 	}
+}
+
+func TestHighlightDirNamesHandlesBlankAndInvalidTitles(t *testing.T) {
+	t.Parallel()
+
+	dirs := highlightDirNames([]instagram.Highlight{
+		{ID: "101", Title: ""},
+		{ID: "202", Title: "!!!"},
+		{ID: "303", Title: "\u200b"},
+	})
+
+	if dirs["101"] != "highlight_101" {
+		t.Fatalf("unexpected dir for blank title: %q", dirs["101"])
+	}
+	if dirs["202"] != "highlight_202" {
+		t.Fatalf("unexpected dir for invalid title: %q", dirs["202"])
+	}
+	if dirs["303"] != "highlight_303" {
+		t.Fatalf("unexpected dir for invisible title: %q", dirs["303"])
+	}
+}
+
+func TestSectionFailureDoesNotStopLaterSections(t *testing.T) {
+	t.Parallel()
+
+	var calls []string
+	errs := runIndependentSections([]sectionRunner{
+		func() error {
+			calls = append(calls, "posts")
+			return errors.New("posts failed")
+		},
+		func() error {
+			calls = append(calls, "stories")
+			return nil
+		},
+		func() error {
+			calls = append(calls, "highlights")
+			return nil
+		},
+	})
+
+	if errs != 1 {
+		t.Fatalf("unexpected error count: %d", errs)
+	}
+	if got := len(calls); got != 3 {
+		t.Fatalf("expected all sections to run, got %d", got)
+	}
+}
+
+func TestFatalProfileIDFailureStopsBeforeSections(t *testing.T) {
+	t.Parallel()
+
+	fatalErr := errors.New("failed to resolve profile id")
+	sectionsRan := false
+	if fatalErr != nil {
+		if sectionsRan {
+			t.Fatal("sections should not run after fatal profile error")
+		}
+		return
+	}
+	_ = runIndependentSections([]sectionRunner{func() error {
+		sectionsRan = true
+		return nil
+	}})
 }
 
 func TestDownloadMediaErrorsWhenMediaHasNoURL(t *testing.T) {

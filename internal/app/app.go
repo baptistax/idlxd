@@ -45,8 +45,14 @@ func Run(ctx context.Context, cfg config.Config) error {
 	pacer.Start()
 	defer pacer.Stop()
 
+	if err := ig.EnsureTokens(ctx); err != nil {
+		printFooter(time.Since(startedAt), "failed due to fatal error")
+		return err
+	}
+
 	profile, err := ig.FetchProfile(ctx, cfg.Username)
 	if err != nil {
+		printFooter(time.Since(startedAt), "failed due to fatal error")
 		return err
 	}
 
@@ -63,36 +69,49 @@ func Run(ctx context.Context, cfg config.Config) error {
 	printBanner()
 	printKV("Target", profile.Username)
 	printKV("Output", userRoot)
-	if profile.UserID != "" {
-		printKV("Profile ID", profile.UserID)
+	printKV("Profile ID", profile.UserID)
+	printKV("Private", fmt.Sprintf("%t", profile.IsPrivate))
+	if profile.PostsCountKnown {
+		printKV("Posts", fmt.Sprintf("%d", profile.PostsCount))
+	} else {
+		printKV("Posts", "unknown")
 	}
 	fmt.Println()
 
-	firstErr := error(nil)
-	userID := profile.UserID
+	sectionErrors := runIndependentSections([]sectionRunner{
+		func() error { return downloadPosts(ctx, ig, dl, pacer, safeUser, profile.Username) },
+		func() error { return downloadReels(ctx, ig, dl, pacer, safeUser, profile.Username, profile.UserID) },
+		func() error { return downloadStories(ctx, ig, dl, pacer, safeUser, profile.Username, profile.UserID) },
+		func() error {
+			return downloadHighlights(ctx, ig, dl, pacer, safeUser, profile.Username, profile.UserID)
+		},
+	})
 
-	timelineUserID, err := downloadTimeline(ctx, ig, dl, pacer, safeUser, profile.Username, profile.UserID)
-	if err != nil && firstErr == nil {
-		firstErr = err
+	if sectionErrors == 0 {
+		printFooter(time.Since(startedAt), "completed with no errors")
+	} else {
+		printFooter(time.Since(startedAt), "completed with section errors")
 	}
-	if userID == "" {
-		userID = timelineUserID
-	}
-
-	if userID != "" {
-		if err := downloadHighlights(ctx, ig, dl, pacer, safeUser, profile.Username, userID); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	} else if firstErr == nil {
-		firstErr = errors.New("failed to resolve profile id")
-	}
-
-	printFooter(time.Since(startedAt), firstErr == nil)
-	return firstErr
+	return nil
 }
 
-func downloadTimeline(ctx context.Context, ig *instagram.Client, dl *downloader.Downloader, pacer *Pacer, safeUser, username, initialUserID string) (string, error) {
-	printSectionHeader(1, 2, "Posts / Reels")
+type sectionRunner func() error
+
+func runIndependentSections(sections []sectionRunner) int {
+	errors := 0
+	for _, section := range sections {
+		if section == nil {
+			continue
+		}
+		if err := section(); err != nil {
+			errors++
+		}
+	}
+	return errors
+}
+
+func downloadPosts(ctx context.Context, ig *instagram.Client, dl *downloader.Downloader, pacer *Pacer, safeUser, username string) error {
+	printSectionHeader(1, 4, "Posts")
 	var progress *Progress
 	defer func() {
 		if progress != nil {
@@ -101,24 +120,25 @@ func downloadTimeline(ctx context.Context, ig *instagram.Client, dl *downloader.
 	}()
 
 	after := ""
-	userID := initialUserID
 	firstErr := error(nil)
 	downloaded := 0
-	processItems := func(items []instagram.Media, subdir string) {
+	failed := 0
+	processItems := func(items []instagram.Media) {
 		for _, m := range items {
 			jobs := timelineMediaJobs(m)
 			if len(jobs) > 0 && progress == nil {
-				progress = NewProgress("POSTS / REELS")
+				progress = NewProgress("POSTS")
 				progress.Start()
 			}
 			if progress != nil {
 				progress.AddTotal(len(jobs))
 			}
 			for _, job := range jobs {
-				if err := downloadMedia(ctx, ig, dl, pacer, safeUser, username, subdir, job.media, job.idx); err != nil {
+				if err := downloadMedia(ctx, ig, dl, pacer, safeUser, username, "posts", job.media, job.idx); err != nil {
 					if firstErr == nil {
 						firstErr = err
 					}
+					failed++
 					if progress != nil {
 						progress.IncFail()
 					}
@@ -135,18 +155,18 @@ func downloadTimeline(ctx context.Context, ig *instagram.Client, dl *downloader.
 	for {
 		select {
 		case <-ctx.Done():
-			return userID, ctx.Err()
+			return ctx.Err()
 		default:
 		}
 
 		items, pageInfo, uid, err := ig.FetchPostsPage(ctx, username, after)
 		if err != nil {
-			return userID, err
+			printSectionError(err)
+			printSectionSummary(downloaded, failed)
+			return err
 		}
-		if userID == "" && uid != "" {
-			userID = uid
-		}
-		processItems(items, "posts")
+		_ = uid
+		processItems(items)
 
 		if !pageInfo.HasNextPage || pageInfo.EndCursor == "" {
 			break
@@ -155,37 +175,13 @@ func downloadTimeline(ctx context.Context, ig *instagram.Client, dl *downloader.
 		time.Sleep(250 * time.Millisecond)
 	}
 
-	if userID != "" {
-		after = ""
-		for {
-			select {
-			case <-ctx.Done():
-				return userID, ctx.Err()
-			default:
-			}
-
-			items, pageInfo, err := ig.FetchReelsPage(ctx, username, userID, after)
-			if err != nil {
-				return userID, err
-			}
-			processItems(items, "reels")
-
-			if !pageInfo.HasNextPage || pageInfo.EndCursor == "" {
-				break
-			}
-			after = pageInfo.EndCursor
-			time.Sleep(250 * time.Millisecond)
-		}
-	}
-
-	failed := 0
 	if progress != nil {
-		failed = progress.Failed()
 		progress.Finish()
 		progress = nil
 	}
 	printSectionSummary(downloaded, failed)
-	return userID, firstErr
+	printSectionError(firstErr)
+	return firstErr
 }
 
 type timelineMediaJob struct {
@@ -208,8 +204,88 @@ func timelineMediaJobs(m instagram.Media) []timelineMediaJob {
 	return jobs
 }
 
+func downloadReels(ctx context.Context, ig *instagram.Client, dl *downloader.Downloader, pacer *Pacer, safeUser, username, userID string) error {
+	printSectionHeader(2, 4, "Reels")
+	after := ""
+	firstErr := error(nil)
+	downloaded := 0
+	failed := 0
+	var progress *Progress
+	defer func() {
+		if progress != nil {
+			progress.Finish()
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		items, pageInfo, err := ig.FetchReelsPage(ctx, username, userID, after)
+		if err != nil {
+			printSectionSummary(downloaded, failed)
+			printSectionError(err)
+			return err
+		}
+		if len(items) > 0 && progress == nil {
+			progress = NewProgress("REELS")
+			progress.Start()
+		}
+		if progress != nil {
+			progress.AddTotal(len(items))
+		}
+		for _, item := range items {
+			if err := downloadMedia(ctx, ig, dl, pacer, safeUser, username, "reels", item, 0); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				failed++
+				if progress != nil {
+					progress.IncFail()
+				}
+			} else {
+				downloaded++
+				if progress != nil {
+					progress.IncOK()
+				}
+			}
+		}
+
+		if !pageInfo.HasNextPage || pageInfo.EndCursor == "" {
+			break
+		}
+		after = pageInfo.EndCursor
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	if progress != nil {
+		progress.Finish()
+		progress = nil
+	}
+	printSectionSummary(downloaded, failed)
+	printSectionError(firstErr)
+	return firstErr
+}
+
+func downloadStories(ctx context.Context, ig *instagram.Client, dl *downloader.Downloader, pacer *Pacer, safeUser, username, userID string) error {
+	printSectionHeader(3, 4, "Stories")
+	items, err := ig.FetchStories(ctx, username, userID)
+	if err != nil {
+		printSectionSummary(0, 0)
+		printSectionError(err)
+		return err
+	}
+	downloaded, failed, firstErr := downloadMediaList(ctx, ig, dl, pacer, safeUser, username, "stories", "STORIES", items)
+	printSectionSummary(downloaded, failed)
+	printSectionError(firstErr)
+	return firstErr
+}
+
 func downloadHighlights(ctx context.Context, ig *instagram.Client, dl *downloader.Downloader, pacer *Pacer, safeUser, username, userID string) error {
-	printSectionHeader(2, 2, "Highlights")
+	printSectionHeader(4, 4, "Highlights")
 	var progress *Progress
 	defer func() {
 		if progress != nil {
@@ -219,6 +295,8 @@ func downloadHighlights(ctx context.Context, ig *instagram.Client, dl *downloade
 
 	hs, err := ig.FetchHighlightsTray(ctx, username, userID)
 	if err != nil {
+		printSectionSummary(0, 0)
+		printSectionError(err)
 		return err
 	}
 	if len(hs) == 0 {
@@ -243,8 +321,10 @@ func downloadHighlights(ctx context.Context, ig *instagram.Client, dl *downloade
 		default:
 		}
 
-		reels, pageInfo, err := ig.FetchHighlightsPage(ctx, username, reelIDs, after, 10)
+		reels, pageInfo, err := ig.FetchHighlightsPage(ctx, username, reelIDs, after, 2)
 		if err != nil {
+			printSectionSummary(downloaded, 0)
+			printSectionError(err)
 			return err
 		}
 
@@ -292,7 +372,43 @@ func downloadHighlights(ctx context.Context, ig *instagram.Client, dl *downloade
 		progress = nil
 	}
 	printSectionSummary(downloaded, failed)
+	printSectionError(firstErr)
 	return firstErr
+}
+
+func downloadMediaList(ctx context.Context, ig *instagram.Client, dl *downloader.Downloader, pacer *Pacer, safeUser, username, subdir, label string, items []instagram.Media) (int, int, error) {
+	var progress *Progress
+	if len(items) > 0 {
+		progress = NewProgress(label)
+		progress.Start()
+		progress.AddTotal(len(items))
+		defer progress.Finish()
+	}
+
+	firstErr := error(nil)
+	downloaded := 0
+	failed := 0
+	for i, item := range items {
+		idx := 0
+		if len(items) > 1 {
+			idx = i + 1
+		}
+		if err := downloadMedia(ctx, ig, dl, pacer, safeUser, username, subdir, item, idx); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			failed++
+			if progress != nil {
+				progress.IncFail()
+			}
+			continue
+		}
+		downloaded++
+		if progress != nil {
+			progress.IncOK()
+		}
+	}
+	return downloaded, failed, firstErr
 }
 
 func highlightDirNames(hs []instagram.Highlight) map[string]string {
@@ -323,7 +439,7 @@ func highlightDirNames(hs []instagram.Highlight) map[string]string {
 
 func highlightDirBaseName(title string) string {
 	name := utils.SanitizePathSegment(title)
-	if name == "" {
+	if name == "" || name == "unknown" {
 		return "highlight"
 	}
 	return name

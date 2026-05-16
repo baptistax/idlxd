@@ -5,6 +5,9 @@
 .DS_Store
 cookies.txt
 /out/
+.private/
+.private*
+*.har
 
 # Release artifacts
 /dist/

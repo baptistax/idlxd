@@ -46,15 +46,16 @@ func printSectionHeader(step, total int, title string) {
 
 func printSectionSummary(downloaded, failed int) {
 	fmt.Printf("Saved: %d files\n", downloaded)
-	if failed > 0 {
-		fmt.Printf("Failed: %d files\n", failed)
+	fmt.Printf("Failed: %d files\n", failed)
+}
+
+func printSectionError(err error) {
+	if err != nil {
+		fmt.Printf("Section error: %v\n", err)
 	}
 }
 
-func printFooter(elapsed time.Duration, success bool) {
-	label := "Finished in"
-	if !success {
-		label = "Stopped in"
-	}
-	fmt.Printf("\n%s %s\n", label, formatElapsed(elapsed))
+func printFooter(elapsed time.Duration, status string) {
+	fmt.Printf("\nFinished in %s\n", formatElapsed(elapsed))
+	fmt.Printf("Status: %s\n", status)
 }
