@@ -1,0 +1,31 @@
+# Local sessions, secrets and captures
+cookies.txt
+cookies.json
+.env
+.env.*
+.envrc
+credentials.json
+access_token.txt
+*.key
+*.pem
+*.har
+*.har.gz
+/evidence/
+/testdata/
+/.private*/
+/backups/
+/out/
+
+# Build output and scratch files
+/bin/
+/build/
+/dist/
+/idl
+*.exe
+*.test
+coverage.out
+*.tmp
+*.tmp.*
+*.log
+*.bak
+.DS_Store
